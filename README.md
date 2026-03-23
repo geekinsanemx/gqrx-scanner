@@ -61,8 +61,12 @@ gqrx-scanner
                                                       -f 157M-2M (scan 155-157MHz downward)
                                Without suffix: must be >= 1000000 Hz
                                Default: the current frequency tuned in Gqrx. Incompatible with -b, -e
--b, --min <freq>             Frequency range begins with this <freq> in Hz. Incompatible with -f
--e, --max <freq>             Frequency range ends with this <freq> in Hz. Incompatible with -f
+-b, --min <freq>             Frequency range begins with this <freq>. Incompatible with -f
+                               Supports K/KHz and M/MHz suffixes or Hz (>= 1000000)
+                               Examples: --min 147M, --min 147.5MHz, --min 147000000
+-e, --max <freq>             Frequency range ends with this <freq>. Incompatible with -f
+                               Supports K/KHz and M/MHz suffixes or Hz (>= 1000000)
+                               Examples: --max 148M, --max 148.5MHz, --max 148000000
 -s, --step <freq>            Frequency step. Default: 2500 (2.5KHz)
                                Supports K/KHz and M/MHz suffixes
                                Examples: --step 25K, --step 2.5K, --step 2500
@@ -144,13 +148,13 @@ Performs a sweep scan from the central frequency 144.000 MHz using the range 143
 Performs a scan using Gqrx bookmarks, monitoring only the frequencies tagged with "DMR" or "Radio Links" in the range 430MHz-431MHz:
 
 ```
-./gqrx-scanner -m bookmark --min 430000000 --max 431000000 --tags "DMR|Radio Links"
+./gqrx-scanner -m bookmark --min 430M --max 431M --tags "DMR|Radio Links"
 ```
 <br>
 
 Performs a sweep scan from frequency 430MHz to 431MHz, using a delay of 3 seconds as idle time after a signal is lost:
 ```
-./gqrx-scanner --min 430000000 --max 431000000 -d 3s
+./gqrx-scanner --min 430M --max 431M -d 3s
 ```
 <br>
 

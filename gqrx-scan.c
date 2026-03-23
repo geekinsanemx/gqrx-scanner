@@ -184,8 +184,12 @@ void print_usage ( char *name )
     printf ("                                                      -f 157M-2M (scan 155-157MHz downward)\n");
     printf ("                               Without suffix: must be >= 1000000 Hz\n");
     printf ("                               Default: the current frequency tuned in Gqrx. Incompatible with -b, -e\n");
-    printf ("-b, --min <freq>             Frequency range begins with this <freq> in Hz. Incompatible with -f\n");
-    printf ("-e, --max <freq>             Frequency range ends with this <freq> in Hz. Incompatible with -f\n");
+    printf ("-b, --min <freq>             Frequency range begins with this <freq>. Incompatible with -f\n");
+    printf ("                               Supports K/KHz and M/MHz suffixes or Hz (>= 1000000)\n");
+    printf ("                               Examples: --min 147M, --min 147.5MHz, --min 147000000\n");
+    printf ("-e, --max <freq>             Frequency range ends with this <freq>. Incompatible with -f\n");
+    printf ("                               Supports K/KHz and M/MHz suffixes or Hz (>= 1000000)\n");
+    printf ("                               Examples: --max 148M, --max 148.5MHz, --max 148000000\n");
     printf ("-s, --step <freq>            Frequency step. Default: 2500 (2.5KHz)\n");
     printf ("                               Supports K/KHz and M/MHz suffixes\n");
     printf ("                               Examples: --step 25K, --step 2.5K, --step 2500\n");
@@ -588,9 +592,13 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_min_freq = atoll(optarg)) == 0)
+                bool min_error = false;
+                opt_min_freq = parse_frequency_value(optarg, &min_error);
+                if (min_error || opt_min_freq == 0)
                 {
-                    printf ("Error: -%c: Invalid frequency\n", c);
+                    printf ("Error: --min: Invalid frequency\n");
+                    printf ("  Use suffix (K/KHz or M/MHz) or value >= 1000000 Hz\n");
+                    printf ("  Examples: --min 147M, --min 147.5MHz, --min 147000000\n");
                     print_usage(argv[0]);
                 }
 
@@ -602,9 +610,13 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_max_freq = atoll(optarg)) == 0)
+                bool max_error = false;
+                opt_max_freq = parse_frequency_value(optarg, &max_error);
+                if (max_error || opt_max_freq == 0)
                 {
-                    printf ("Error: -%c: Invalid frequency\n", c);
+                    printf ("Error: --max: Invalid frequency\n");
+                    printf ("  Use suffix (K/KHz or M/MHz) or value >= 1000000 Hz\n");
+                    printf ("  Examples: --max 148M, --max 148.5MHz, --max 148000000\n");
                     print_usage(argv[0]);
                 }
             break;
