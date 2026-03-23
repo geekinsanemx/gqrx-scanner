@@ -106,7 +106,7 @@ static char freq_string[BUFSIZE] = {0};
 const char     *g_hostname          = "localhost";
 const int       g_portno            = 7356;
 const freq_t    g_freq_delta        = 1000000; // +- 1Mhz default bandwidth to scan from tuned freq.
-const freq_t    g_default_scan_bw   = 10000;   // default scan frequency steps (10Khz)
+const freq_t    g_default_scan_bw   = 2500;    // default scan frequency steps (2.5Khz)
 const freq_t    g_ban_tollerance    = 10000;   // +- 10Khz bandwidth to ban from current freq.
 const long      g_delay             = 2500000; // 2.5 sec in microseconds
 const char     *g_bookmarksfile     = "~/.config/gqrx/bookmarks.csv";
@@ -136,6 +136,13 @@ bool            opt_verbose = false;
 // set squelch delta
 double          opt_squelch_delta = 0.0;
 bool            opt_squelch_delta_auto_enable = false;
+// new scan control options
+int             opt_repeat = -1;           // -1 = infinite, 0 = one pass, N = N passes
+freq_t          opt_freq_range = 0;        // 0 = use g_freq_delta, otherwise custom range
+bool            opt_freq_unidirectional = false;  // true if -f uses +/- syntax
+bool            opt_freq_direction_up = true;     // true = scan upward, false = scan downward
+bool            opt_set_squelch_enable = false;   // true if user wants to set initial squelch
+double          opt_set_squelch_value = 0.0;      // initial squelch value to set
 //
 // Local Prototypes
 //
@@ -152,8 +159,8 @@ void print_usage ( char *name )
     printf ("Usage:\n");
     printf ("%s\n\t\t[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]\n", name);
     printf ("\t\t[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]\n");
-    printf ("\t\t[-d|--delay <lingering time in milliseconds>]\n");
-    printf ("\t\t[-l|--max-listen <maximum listening time in milliseconds>]\n");
+    printf ("\t\t[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]\n");
+    printf ("\t\t[-d|--delay <time>] [-l|--max-listen <time>]\n");
     printf ("\t\t[-t|--tags <\"tag1|tag2|...\">]\n");
     printf ("\t\t[-v|--verbose]\n");
     printf ("\t\t[-r|--record]\n");
@@ -162,15 +169,26 @@ void print_usage ( char *name )
     printf ("-p, --port <port>            The number of the port to connect. Default: 7356\n");
     printf ("-m, --mode <mode>            Scan mode to be used. Default: sweep\n");
     printf ("                               Possible values for <mode>: sweep, bookmark\n");
-    printf ("-f, --freq <freq>            Frequency to scan with a range of +- 1MHz.\n");
-    printf ("                               Default: the current frequency tuned in Gqrx Incompatible with -b, -e\n");
+    printf ("-f, --freq <freq>            Frequency to scan with a range of +- 1MHz (or use --range).\n");
+    printf ("                               Supports K/KHz and M/MHz suffixes (e.g., 156M, 144.5MHz, 500K)\n");
+    printf ("                               Unidirectional syntax: -f 156M+1M (scan 156-157MHz upward)\n");
+    printf ("                                                      -f 157M-2M (scan 155-157MHz downward)\n");
+    printf ("                               Without suffix: must be >= 1000000 Hz\n");
+    printf ("                               Default: the current frequency tuned in Gqrx. Incompatible with -b, -e\n");
     printf ("-b, --min <freq>             Frequency range begins with this <freq> in Hz. Incompatible with -f\n");
     printf ("-e, --max <freq>             Frequency range ends with this <freq> in Hz. Incompatible with -f\n");
-    printf ("-s, --step <freq>            Frequency step <freq> in Hz. Default: %llu\n", g_default_scan_bw);
-    printf ("-d, --delay <time>           Lingering time in milliseconds before the scanner reactivates. Default 2000\n");
-    printf ("-l, --max-listen <time>      Maximum time to listen to an active frequency. Default 0, no maximum\n");
-    printf ("-x, --speed <time>           Time in milliseconds for bookmark scan speed. Default 250 milliseconds.\n");
-    printf ("                               If scan lands on wrong bookmark during search, use -x 500 (ms) to slow down speed\n");
+    printf ("-s, --step <freq>            Frequency step. Default: 2500 (2.5KHz)\n");
+    printf ("                               Supports K/KHz and M/MHz suffixes\n");
+    printf ("                               Examples: --step 25K, --step 2.5K, --step 2500\n");
+    printf ("-d, --delay <time>           Lingering time before scanner reactivates. Default: 2s (2000ms)\n");
+    printf ("                               Supports: s (seconds), m (minutes), or milliseconds\n");
+    printf ("                               Examples: --delay 5s, --delay 1m, --delay 2500\n");
+    printf ("-l, --max-listen <time>      Maximum time to listen to active frequency. Default: 0 (no limit)\n");
+    printf ("                               Supports: s (seconds), m (minutes), or milliseconds\n");
+    printf ("                               Examples: --max-listen 10s, --max-listen 1m, --max-listen 5000\n");
+    printf ("-x, --speed <time>           Bookmark scan speed. Default: 250ms\n");
+    printf ("                               Supports: s (seconds), m (minutes), or milliseconds\n");
+    printf ("                               If scan lands on wrong bookmark, use -x 500 or -x 1s to slow down\n");
     printf ("-y  --date                   Date Format, default is 0.\n");
     printf ("                               0 = mm-dd-yy\n");
     printf ("                               1 = dd-mm-yy\n");
@@ -186,7 +204,16 @@ void print_usage ( char *name )
     printf ("                               \"tags\" is a quoted string with a '|' list separator: Ex: \"Tag1|Tag2\"\n");
     printf ("                               tags are case insensitive and match also for partial string contained in a tag\n");
     printf ("                               Works only with -m bookmark scan mode\n");
-    printf ("-r, --record                  Enable recording of detected signals\n");
+    printf ("-r, --record                 Enable recording of detected signals\n");
+    printf ("-R, --range <freq>           Frequency range for -f option. Default: 1MHz (1000000 Hz)\n");
+    printf ("                               Supports K/KHz and M/MHz suffixes\n");
+    printf ("                               Examples: --range 2M, --range 500K, --range 2000000\n");
+    printf ("                               Cannot be used with -f <freq>+/-<offset> syntax\n");
+    printf ("-n, --repeat <N>             Number of scan passes. Default: infinite\n");
+    printf ("                               0 = one pass, N = N passes, omit for infinite scanning\n");
+    printf ("                               Program exits after completing the specified number of passes\n");
+    printf ("-S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning\n");
+    printf ("                               Example: --set-squelch -50.5\n");
     printf ("-v, --verbose                Output more information during scan (used for debug). Default: false\n");
     printf ("--help                       This help message.\n");
     printf ("\n");
@@ -194,9 +221,15 @@ void print_usage ( char *name )
     printf ("%s -m bookmark --min 430000000 --max 431000000 --tags \"DMR|Radio Links\"\n", name);
     printf ("\tPerforms a scan using Gqrx bookmarks, monitoring only the frequencies\n");
     printf ("\ttagged with \"DMR\" or \"Radio Links\" in the range 430MHz-431MHz\n");
-    printf ("%s --min 430000000 --max 431000000 -d 3000\n", name);
+    printf ("%s --min 430000000 --max 431000000 -d 3s\n", name);
     printf ("\tPerforms a sweep scan from frequency 430MHz to 431MHz, using a delay of \n");
-    printf ("\t3 secs as idle time after a signal is lost, restarting the sweep loop when this time expires\n");
+    printf ("\t3 seconds as idle time after a signal is lost, restarting the sweep loop when this time expires\n");
+    printf ("%s -f 156M --range 500K --repeat 0\n", name);
+    printf ("\tScans 155.5-156.5 MHz once (one complete pass) and exits\n");
+    printf ("%s -f 155M+2M --repeat 10\n", name);
+    printf ("\tScans from 155 to 157 MHz (upward only) 10 times and exits\n");
+    printf ("%s -f 144.5M --range 500K\n", name);
+    printf ("\tScans 144-145 MHz continuously (default infinite mode) with custom range\n");
     printf ("\n");
     printf ("Full documentation available at <https://github.com/neural75/gqrx-scanner>\n");
 
@@ -229,6 +262,120 @@ bool ParseTags (char *tags)
     return true;
 }
 
+//
+// parse_frequency_value - Parse frequency string with K/M suffix support
+// Returns frequency in Hz, sets error flag if parsing fails
+//
+freq_t parse_frequency_value(const char *str, bool *error)
+{
+    *error = false;
+
+    if (str == NULL || strlen(str) == 0)
+    {
+        *error = true;
+        return 0;
+    }
+
+    char *endptr;
+    double value = strtod(str, &endptr);
+
+    if (value <= 0)
+    {
+        *error = true;
+        return 0;
+    }
+
+    // Check for suffix
+    if (*endptr != '\0')
+    {
+        // Convert suffix to uppercase for comparison
+        char suffix[10] = {0};
+        int i = 0;
+        while (*endptr != '\0' && i < 9)
+        {
+            suffix[i] = toupper(*endptr);
+            endptr++;
+            i++;
+        }
+
+        if (strcmp(suffix, "M") == 0 || strcmp(suffix, "MHZ") == 0)
+        {
+            return (freq_t)(value * 1000000);
+        }
+        else if (strcmp(suffix, "K") == 0 || strcmp(suffix, "KHZ") == 0)
+        {
+            return (freq_t)(value * 1000);
+        }
+        else
+        {
+            *error = true;
+            return 0;
+        }
+    }
+    else
+    {
+        // No suffix - must be >= 1000000 Hz
+        freq_t freq = (freq_t)value;
+        if (freq < 1000000)
+        {
+            *error = true;
+            return 0;
+        }
+        return freq;
+    }
+}
+
+//
+// parse_time_value - Parse time string with s/m suffix support
+// Returns time in milliseconds, sets error flag if parsing fails
+//
+long parse_time_value(const char *str, bool *error)
+{
+    *error = false;
+
+    if (str == NULL || strlen(str) == 0)
+    {
+        *error = true;
+        return 0;
+    }
+
+    char *endptr;
+    double value = strtod(str, &endptr);
+
+    if (value < 0)
+    {
+        *error = true;
+        return 0;
+    }
+
+    // Check for suffix
+    if (*endptr != '\0')
+    {
+        char suffix = toupper(*endptr);
+
+        if (suffix == 'S')
+        {
+            // Seconds to milliseconds
+            return (long)(value * 1000);
+        }
+        else if (suffix == 'M')
+        {
+            // Minutes to milliseconds
+            return (long)(value * 60000);
+        }
+        else
+        {
+            *error = true;
+            return 0;
+        }
+    }
+    else
+    {
+        // No suffix - assume milliseconds for backward compatibility
+        return (long)value;
+    }
+}
+
 bool ParseInputOptions (int argc, char **argv)
 {
   int c;
@@ -257,12 +404,15 @@ bool ParseInputOptions (int argc, char **argv)
           {"squelch_delta",    required_argument, 0, 'q'},
           {"max-listen",       required_argument, 0, 'l'},
           {"record", no_argument, 0, 'r'},
+          {"range",   required_argument, 0, 'R'},
+          {"repeat",  required_argument, 0, 'n'},
+          {"set-squelch", required_argument, 0, 'S'},
           {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:r",
+        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:rR:n:S:",
                         long_options, &option_index);
 
         // warning: I don't know why but required argument are not so "required"
@@ -333,20 +483,83 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_freq = atoll(optarg)) == 0)
+                // Check for unidirectional syntax: -f 156M+1M or -f 156M-1M
+                char *plus_sign = strchr(optarg + 1, '+');  // Skip first char to ignore negative numbers
+                char *minus_sign = strchr(optarg + 1, '-');
+
+                if (plus_sign != NULL || minus_sign != NULL)
                 {
-                    printf ("Error: -%c: Invalid frequency\n", c);
-                    print_usage(argv[0]);
-                }
-                if (opt_freq > g_freq_delta)
-                {
-                    opt_min_freq = opt_freq - g_freq_delta;
-                    opt_max_freq = opt_freq + g_freq_delta;
+                    // Unidirectional syntax detected
+                    if (opt_freq_range != 0)
+                    {
+                        printf ("Error: Cannot use --range with -f <freq>+/-<offset> syntax\n");
+                        print_usage(argv[0]);
+                    }
+
+                    char *separator = (plus_sign != NULL) ? plus_sign : minus_sign;
+                    opt_freq_direction_up = (plus_sign != NULL);
+                    opt_freq_unidirectional = true;
+
+                    // Split string at separator
+                    size_t base_len = separator - optarg;
+                    char base_freq_str[BUFSIZE] = {0};
+                    strncpy(base_freq_str, optarg, base_len);
+
+                    char *offset_str = separator + 1;
+
+                    // Parse base frequency and offset
+                    bool base_error = false, offset_error = false;
+                    freq_t base_freq = parse_frequency_value(base_freq_str, &base_error);
+                    freq_t offset = parse_frequency_value(offset_str, &offset_error);
+
+                    if (base_error || offset_error)
+                    {
+                        printf ("Error: -f: Invalid frequency format in unidirectional syntax\n");
+                        printf ("  Use suffix (K/KHz or M/MHz) or value >= 1000000 Hz\n");
+                        printf ("  Examples: -f 156M+1M, -f 430M+500K, -f 156000000+1000000\n");
+                        print_usage(argv[0]);
+                    }
+
+                    // Calculate min/max based on direction
+                    if (opt_freq_direction_up)
+                    {
+                        opt_min_freq = base_freq;
+                        opt_max_freq = base_freq + offset;
+                    }
+                    else
+                    {
+                        opt_min_freq = base_freq - offset;
+                        opt_max_freq = base_freq;
+                    }
+                    opt_freq = base_freq;
                 }
                 else
                 {
-                    printf ("Error: -%c: Invalid frequency\n", c);
-                    print_usage(argv[0]);
+                    // Bidirectional syntax: -f 156M (scan +- range)
+                    bool freq_error = false;
+                    opt_freq = parse_frequency_value(optarg, &freq_error);
+
+                    if (freq_error)
+                    {
+                        printf ("Error: -f: Invalid frequency\n");
+                        printf ("  Use suffix (K/KHz or M/MHz) or value >= 1000000 Hz\n");
+                        printf ("  Examples: -f 156M, -f 144.5MHz, -f 156000000\n");
+                        print_usage(argv[0]);
+                    }
+
+                    // Use opt_freq_range if set, otherwise use g_freq_delta
+                    freq_t range = (opt_freq_range != 0) ? opt_freq_range : g_freq_delta;
+
+                    if (opt_freq > range)
+                    {
+                        opt_min_freq = opt_freq - range;
+                        opt_max_freq = opt_freq + range;
+                    }
+                    else
+                    {
+                        printf ("Error: -f: Frequency too low for range\n");
+                        print_usage(argv[0]);
+                    }
                 }
             break;
             case 'b':
@@ -383,12 +596,16 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_delay = atol(optarg)) == 0)
+                bool delay_error = false;
+                long delay_ms = parse_time_value(optarg, &delay_error);
+                if (delay_error || delay_ms < 0)
                 {
-                    printf ("Error: -%c: Invalid delay\n", c);
+                    printf ("Error: --delay: Invalid time value\n");
+                    printf ("  Use suffix (s for seconds, m for minutes) or value in milliseconds\n");
+                    printf ("  Examples: --delay 5s, --delay 1m, --delay 2500\n");
                     print_usage(argv[0]);
                 }
-                opt_delay *= 1000; // in microsec
+                opt_delay = delay_ms * 1000; // convert to microseconds
             break;
 
             case 'l':
@@ -398,12 +615,16 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_max_listen = atol(optarg)) == 0)
+                bool listen_error = false;
+                long listen_ms = parse_time_value(optarg, &listen_error);
+                if (listen_error || listen_ms < 0)
                 {
-                    printf ("Error: -%c: Invalid time\n", c);
+                    printf ("Error: --max-listen: Invalid time value\n");
+                    printf ("  Use suffix (s for seconds, m for minutes) or value in milliseconds\n");
+                    printf ("  Examples: --max-listen 10s, --max-listen 1m, --max-listen 5000\n");
                     print_usage(argv[0]);
                 }
-                opt_max_listen *= 1000; // in microsec
+                opt_max_listen = listen_ms * 1000; // convert to microseconds
             break;
 
             case 'x':
@@ -413,12 +634,16 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_speed = atol(optarg)) == 0)
+                bool speed_error = false;
+                long speed_ms = parse_time_value(optarg, &speed_error);
+                if (speed_error || speed_ms < 0)
                 {
-                    printf ("Error: -%c: Invalid speed\n", c);
+                    printf ("Error: --speed: Invalid time value\n");
+                    printf ("  Use suffix (s for seconds, m for minutes) or value in milliseconds\n");
+                    printf ("  Examples: --speed 250, --speed 500, --speed 1s\n");
                     print_usage(argv[0]);
                 }
-                opt_speed *= 1000; // in microsec //LWVMOBILE: Made new opt_speed variable. Implemented and working for bookmark mode.
+                opt_speed = speed_ms * 1000; // convert to microseconds //LWVMOBILE: Made new opt_speed variable. Implemented and working for bookmark mode.
             break;
 
             case 'y':
@@ -484,14 +709,98 @@ bool ParseInputOptions (int argc, char **argv)
                     print_usage(argv[0]);
                 }
 
-                if ((opt_scan_bw = atoll(optarg)) == 0)
+                // Parse step with K/M suffix support (no minimum value requirement)
+                char *step_endptr;
+                double step_value = strtod(optarg, &step_endptr);
+
+                if (step_value <= 0)
                 {
-                    printf ("Error: -%c: Invalid frequency step\n", c);
+                    printf ("Error: --step: Invalid frequency step (must be > 0)\n");
+                    print_usage(argv[0]);
+                }
+
+                if (*step_endptr != '\0')
+                {
+                    // Has suffix
+                    char step_suffix[10] = {0};
+                    int j = 0;
+                    while (*step_endptr != '\0' && j < 9)
+                    {
+                        step_suffix[j] = toupper(*step_endptr);
+                        step_endptr++;
+                        j++;
+                    }
+
+                    if (strcmp(step_suffix, "M") == 0 || strcmp(step_suffix, "MHZ") == 0)
+                    {
+                        opt_scan_bw = (freq_t)(step_value * 1000000);
+                    }
+                    else if (strcmp(step_suffix, "K") == 0 || strcmp(step_suffix, "KHZ") == 0)
+                    {
+                        opt_scan_bw = (freq_t)(step_value * 1000);
+                    }
+                    else
+                    {
+                        printf ("Error: --step: Invalid suffix (use K/KHz or M/MHz)\n");
+                        print_usage(argv[0]);
+                    }
+                }
+                else
+                {
+                    // No suffix - accept any positive value in Hz
+                    opt_scan_bw = (freq_t)step_value;
+                }
+
+                if (opt_scan_bw == 0)
+                {
+                    printf ("Error: --step: Invalid frequency step\n");
                     print_usage(argv[0]);
                 }
                 break;
             case 'r':
                 opt_record = true;
+                break;
+            case 'R':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+
+                if (opt_freq_unidirectional)
+                {
+                    printf ("Error: Cannot use --range with -f <freq>+/-<offset> syntax\n");
+                    print_usage(argv[0]);
+                }
+
+                bool range_error = false;
+                opt_freq_range = parse_frequency_value(optarg, &range_error);
+                if (range_error || opt_freq_range == 0)
+                {
+                    printf ("Error: --range: Invalid frequency range.\n");
+                    printf ("  Use suffix (K/KHz or M/MHz) or value >= 1000000 Hz\n");
+                    printf ("  Examples: --range 2M, --range 500K, --range 2000000\n");
+                    print_usage(argv[0]);
+                }
+                break;
+            case 'n':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+
+                opt_repeat = atoi(optarg);
+                if (opt_repeat < 0)
+                {
+                    printf ("Error: --repeat: Value must be >= 0 (0=one pass, N=N passes)\n");
+                    print_usage(argv[0]);
+                }
+                break;
+            case 'S':
+                // Allow negative numbers (squelch is typically negative like -45.0)
+                opt_set_squelch_value = atof(optarg);
+                opt_set_squelch_enable = true;
                 break;
             case '?':
             /* getopt_long already printed an error message. */
@@ -957,7 +1266,12 @@ bool ScanBookmarkedFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_m
     long slow_scan_cycle    = 1000000;   // LWVMOBILE: Just doubling numbers to slow down scan time in bookmark search, 1,000,000 = 1 second. EDIT: DOES THIS VARIABLE DO ANYTHING?
     long slow_cycle_saved   = 250000;  // LWVMOBILE: Just doubling numbers to slow down scan time in bookmark search. THIS ONE SEEMS TO ACTUALLY SLOW SCAN SPEED DOWN.
     char timestamp[BUFSIZE] = {0};
-    while (true)
+
+    // Repeat control
+    int repeat_counter = 0;
+    bool keep_scanning = true;
+
+    while (keep_scanning)
     {
         CheckUserInput();
 
@@ -1025,8 +1339,18 @@ bool ScanBookmarkedFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_m
                 }
         }
 
+        // Check repeat limit
+        if (opt_repeat >= 0)
+        {
+            repeat_counter++;
+            if (repeat_counter > opt_repeat)
+            {
+                keep_scanning = false;
+            }
+        }
     }
 
+    return true;
 }
 
 //
@@ -1382,7 +1706,11 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
     int  success_counter    = 0;  // number of correctly acquired signals, reset on bad signals or reaching success_factor
     int  success_factor     = 5; // improving sleep cycle every success_factor of times
 
-    while (true)
+    // Repeat control
+    int repeat_counter = 0;
+    bool keep_scanning = true;
+
+    while (keep_scanning)
     {
         for ( size_t i = 0 ; i < freqeuencies_count; i++)
         {
@@ -1557,7 +1885,19 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
             }
             current_freq+=freq_interval;
             if (current_freq > freq_max)
+            {
+                // Completed one full sweep cycle
+                if (opt_repeat >= 0)
+                {
+                    repeat_counter++;
+                    if (repeat_counter > opt_repeat)
+                    {
+                        keep_scanning = false;
+                        break;  // Exit for loop
+                    }
+                }
                 current_freq = freq_min;
+            }
             sweep_count++;
         }
     }
@@ -1644,6 +1984,13 @@ int main(int argc, char **argv) {
     strcpy (to,   print_freq(opt_max_freq));
     printf ("Frequency range set from %s to %s.\n", from, to);
 
+    // Set initial squelch level if requested
+    if (opt_set_squelch_enable)
+    {
+        SetSquelchLevel(sockfd, opt_set_squelch_value);
+        printf ("Squelch level set to %.2f dB\n", opt_set_squelch_value);
+    }
+
     if (opt_scan_mode == bookmark)
     {
         bookmarksfd = Open(g_bookmarksfile);
@@ -1682,9 +2029,9 @@ int main(int argc, char **argv) {
     else
     {
         ScanBookmarkedFrequenciesInRange(sockfd, opt_min_freq, opt_max_freq, opt_squelch_delta);
+        fclose (bookmarksfd);
     }
 
-    fclose (bookmarksfd);
     close(sockfd);
     free(Frequencies);
     return 0;

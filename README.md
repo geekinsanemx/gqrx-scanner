@@ -44,8 +44,8 @@ Usage:
 gqrx-scanner
 		[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]
 		[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]
-		[-d|--delay <lingering time in milliseconds>]
-		[-l|--max-listen <maximum listening time in milliseconds>]
+		[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]
+		[-d|--delay <time>] [-l|--max-listen <time>]
 		[-t|--tags <"tag1|tag2|...">]
 		[-v|--verbose]
 		[-r|--record]
@@ -54,15 +54,35 @@ gqrx-scanner
 -p, --port <port>            The number of the port to connect. Default: 7356
 -m, --mode <mode>            Scan mode to be used. Default: sweep
                                Possible values for <mode>: sweep, bookmark
--f, --freq <freq>            Frequency to scan with a range of +- 1MHz.
-                               Default: the current frequency tuned in Gqrx Incompatible with -b, -e
+-f, --freq <freq>            Frequency to scan with a range of +- 1MHz (or use --range).
+                               Supports K/KHz and M/MHz suffixes (e.g., 156M, 144.5MHz, 500K)
+                               Unidirectional syntax: -f 156M+1M (scan 156-157MHz upward)
+                                                      -f 157M-2M (scan 155-157MHz downward)
+                               Without suffix: must be >= 1000000 Hz
+                               Default: the current frequency tuned in Gqrx. Incompatible with -b, -e
 -b, --min <freq>             Frequency range begins with this <freq> in Hz. Incompatible with -f
 -e, --max <freq>             Frequency range ends with this <freq> in Hz. Incompatible with -f
--s, --step <freq>            Frequency step <freq> in Hz. Default: 10000
--d, --delay <time>           Lingering time in milliseconds before the scanner reactivates. Default 2000
--l, --max-listen <time>      Maximum time to listen to an active frequency. Default 0, no maximum
--x, --speed <time>           Time in milliseconds for bookmark scan speed. Default 250 milliseconds.
-                               If scan lands on wrong bookmark during search, use -x 500 (ms) to slow down speed
+-s, --step <freq>            Frequency step. Default: 2500 (2.5KHz)
+                               Supports K/KHz and M/MHz suffixes
+                               Examples: --step 25K, --step 2.5K, --step 2500
+-d, --delay <time>           Lingering time before scanner reactivates. Default: 2s (2000ms)
+                               Supports: s (seconds), m (minutes), or milliseconds
+                               Examples: --delay 5s, --delay 1m, --delay 2500
+-l, --max-listen <time>      Maximum time to listen to active frequency. Default: 0 (no limit)
+                               Supports: s (seconds), m (minutes), or milliseconds
+                               Examples: --max-listen 10s, --max-listen 1m, --max-listen 5000
+-x, --speed <time>           Bookmark scan speed. Default: 250ms
+                               Supports: s (seconds), m (minutes), or milliseconds
+                               If scan lands on wrong bookmark, use -x 500 or -x 1s to slow down
+-R, --range <freq>           Frequency range for -f option. Default: 1MHz (1000000 Hz)
+                               Supports K/KHz and M/MHz suffixes
+                               Examples: --range 2M, --range 500K, --range 2000000
+                               Cannot be used with -f <freq>+/-<offset> syntax
+-n, --repeat <N>             Number of scan passes. Default: infinite
+                               0 = one pass, N = N passes, omit for infinite scanning
+                               Program exits after completing the specified number of passes
+-S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning
+                               Example: --set-squelch -50.5
 -y  --date                   Date Format, default is 0.
                                0 = mm-dd-yy
                                1 = dd-mm-yy
@@ -119,9 +139,35 @@ Performs a scan using Gqrx bookmarks, monitoring only the frequencies tagged wit
 ```
 <br>
 
-Performs a sweep scan from frequency 430MHz to 431MHz, using a delay of	3 secs as idle time after a signal is lost, restarting the sweep loop when this time expires:
+Performs a sweep scan from frequency 430MHz to 431MHz, using a delay of 3 seconds as idle time after a signal is lost:
 ```
-./gqrx-scanner --min 430000000 --max 431000000 -d 3000
+./gqrx-scanner --min 430000000 --max 431000000 -d 3s
+```
+<br>
+
+**New frequency suffix support examples:**
+
+Scan 156-157 MHz using simplified notation with 25KHz steps:
+```
+./gqrx-scanner -f 156M --range 500K --step 25K
+```
+<br>
+
+Scan from 155MHz to 157MHz (upward only) once and exit:
+```
+./gqrx-scanner -f 155M+2M --repeat 0
+```
+<br>
+
+Scan 440-442MHz with custom squelch, listening max 10 seconds per signal:
+```
+./gqrx-scanner -f 441M --range 1M --set-squelch -55 --max-listen 10s
+```
+<br>
+
+Scan 144-145MHz exactly 5 times with 2.5KHz steps:
+```
+./gqrx-scanner -f 144.5M --range 500K --step 2.5K --repeat 5
 ```
 
 ### Sample output
