@@ -45,6 +45,7 @@ gqrx-scanner
 		[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]
 		[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]
 		[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]
+		[-A|--save-active <file>] [-E|--exclude-active <file>]
 		[-d|--delay <time>] [-l|--max-listen <time>]
 		[-t|--tags <"tag1|tag2|...">]
 		[-v|--verbose]
@@ -83,6 +84,14 @@ gqrx-scanner
                                Program exits after completing the specified number of passes
 -S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning
                                Example: --set-squelch -50.5
+-A, --save-active <file>     Save active frequencies to file (append mode)
+                               Saves frequency after fine-tuning when signal is detected
+                               Format: timestamp,freq_mhz,signal_level,squelch_level
+                               Example: --save-active active_freqs.csv
+-E, --exclude-active <file>  Exclude frequencies from listening (carriers, unwanted signals)
+                               File format: one frequency per line (MHz or Hz)
+                               Comments start with #
+                               Example: --exclude-active excluded.txt
 -y  --date                   Date Format, default is 0.
                                0 = mm-dd-yy
                                1 = dd-mm-yy
@@ -168,6 +177,40 @@ Scan 440-442MHz with custom squelch, listening max 10 seconds per signal:
 Scan 144-145MHz exactly 5 times with 2.5KHz steps:
 ```
 ./gqrx-scanner -f 144.5M --range 500K --step 2.5K --repeat 5
+```
+<br>
+
+**Active frequency logging and exclusion examples:**
+
+Scan 440-441MHz and save all detected active frequencies to CSV file:
+```
+./gqrx-scanner -f 440M --range 500K --save-active active_freqs.csv
+```
+<br>
+
+Scan while excluding known carrier frequencies and unwanted signals:
+```
+./gqrx-scanner -f 440M --range 500K --exclude-active excluded.txt
+```
+
+Example `excluded.txt` file format:
+```
+# Excluded frequencies - carriers and unwanted signals
+# One frequency per line (MHz or Hz)
+440.500
+441.200
+# DMR carrier
+440.125
+```
+<br>
+
+Complete monitoring setup with logging and exclusions:
+```
+./gqrx-scanner -f 440M --range 1M \
+  --exclude-active excluded.txt \
+  --save-active active_freqs.csv \
+  --max-listen 10s \
+  --set-squelch -55
 ```
 
 ### Sample output

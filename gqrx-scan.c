@@ -97,6 +97,9 @@ int  SavedFreq_Max = 0;
 FREQ BannedFrequencies[SAVED_FREQ_MAX] = {0};
 int  BannedFreq_Max = 0;
 
+FREQ ExcludedFrequencies[SAVED_FREQ_MAX] = {0};
+int  ExcludedFreq_Max = 0;
+
 static char freq_string[BUFSIZE] = {0};
 
 
@@ -143,12 +146,17 @@ bool            opt_freq_unidirectional = false;  // true if -f uses +/- syntax
 bool            opt_freq_direction_up = true;     // true = scan upward, false = scan downward
 bool            opt_set_squelch_enable = false;   // true if user wants to set initial squelch
 double          opt_set_squelch_value = 0.0;      // initial squelch value to set
+char           *opt_save_active_file = NULL;      // file to save active frequencies
+char           *opt_exclude_active_file = NULL;   // file with frequencies to exclude from listening
 //
 // Local Prototypes
 //
 bool BanFreq (freq_t freq_current);
 bool IsBannedFreq (freq_t *freq_current);
 void ClearAllBans ( void );
+bool SaveActiveFrequency (freq_t freq, double level, double squelch);
+bool LoadExcludedFrequencies (const char *filename);
+bool IsExcludedFreq (freq_t *freq);
 
 //
 // ParseInputOptions
@@ -160,6 +168,7 @@ void print_usage ( char *name )
     printf ("%s\n\t\t[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]\n", name);
     printf ("\t\t[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]\n");
     printf ("\t\t[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]\n");
+    printf ("\t\t[-A|--save-active <file>] [-E|--exclude-active <file>]\n");
     printf ("\t\t[-d|--delay <time>] [-l|--max-listen <time>]\n");
     printf ("\t\t[-t|--tags <\"tag1|tag2|...\">]\n");
     printf ("\t\t[-v|--verbose]\n");
@@ -214,6 +223,14 @@ void print_usage ( char *name )
     printf ("                               Program exits after completing the specified number of passes\n");
     printf ("-S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning\n");
     printf ("                               Example: --set-squelch -50.5\n");
+    printf ("-A, --save-active <file>     Save active frequencies to file (append mode)\n");
+    printf ("                               Saves frequency after fine-tuning when signal is detected\n");
+    printf ("                               Format: timestamp,freq_mhz,signal_level,squelch_level\n");
+    printf ("                               Example: --save-active active_freqs.csv\n");
+    printf ("-E, --exclude-active <file>  Exclude frequencies from listening (carriers, unwanted signals)\n");
+    printf ("                               File format: one frequency per line (MHz or Hz)\n");
+    printf ("                               Comments start with #\n");
+    printf ("                               Example: --exclude-active excluded.txt\n");
     printf ("-v, --verbose                Output more information during scan (used for debug). Default: false\n");
     printf ("--help                       This help message.\n");
     printf ("\n");
@@ -407,12 +424,14 @@ bool ParseInputOptions (int argc, char **argv)
           {"range",   required_argument, 0, 'R'},
           {"repeat",  required_argument, 0, 'n'},
           {"set-squelch", required_argument, 0, 'S'},
+          {"save-active", required_argument, 0, 'A'},
+          {"exclude-active", required_argument, 0, 'E'},
           {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:rR:n:S:",
+        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:rR:n:S:A:E:",
                         long_options, &option_index);
 
         // warning: I don't know why but required argument are not so "required"
@@ -801,6 +820,22 @@ bool ParseInputOptions (int argc, char **argv)
                 // Allow negative numbers (squelch is typically negative like -45.0)
                 opt_set_squelch_value = atof(optarg);
                 opt_set_squelch_enable = true;
+                break;
+            case 'A':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+                opt_save_active_file = optarg;
+                break;
+            case 'E':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+                opt_exclude_active_file = optarg;
                 break;
             case '?':
             /* getopt_long already printed an error message. */
@@ -1467,6 +1502,102 @@ bool IsBannedFreq (freq_t *freq_current)
     return false;
 }
 
+//
+// SaveActiveFrequency
+// Saves frequency to file after fine-tuning (append mode)
+//
+bool SaveActiveFrequency (freq_t freq, double level, double squelch)
+{
+    if (opt_save_active_file == NULL)
+        return false;
+
+    FILE *fp = fopen(opt_save_active_file, "a");
+    if (fp == NULL)
+    {
+        printf("Error: Cannot open save-active file: %s\n", opt_save_active_file);
+        return false;
+    }
+
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", t);
+
+    // Format: timestamp, frequency (MHz), signal level, squelch level
+    fprintf(fp, "%s,%.6f,%.2f,%.2f\n",
+            timestamp,
+            freq / 1000000.0,  // Convert to MHz
+            level,
+            squelch);
+
+    fclose(fp);
+    return true;
+}
+
+//
+// LoadExcludedFrequencies
+// Load frequencies from file to exclude from listening
+//
+bool LoadExcludedFrequencies (const char *filename)
+{
+    FILE *fp = fopen(filename, "r");
+    if (fp == NULL)
+    {
+        printf("Warning: Cannot open exclude-active file: %s\n", filename);
+        return false;
+    }
+
+    char line[BUFSIZE];
+    ExcludedFreq_Max = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL && ExcludedFreq_Max < SAVED_FREQ_MAX)
+    {
+        // Skip comments and empty lines
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+            continue;
+
+        // Try to parse frequency (supports MHz format or Hz)
+        double freq_value;
+        if (sscanf(line, "%lf", &freq_value) == 1)
+        {
+            freq_t freq;
+            // If value is small, assume MHz, otherwise Hz
+            if (freq_value < 10000)
+                freq = (freq_t)(freq_value * 1000000);
+            else
+                freq = (freq_t)freq_value;
+
+            ExcludedFrequencies[ExcludedFreq_Max].freq = freq;
+            ExcludedFreq_Max++;
+        }
+    }
+
+    fclose(fp);
+    printf("Loaded %d excluded frequencies from %s\n", ExcludedFreq_Max, filename);
+    return true;
+}
+
+//
+// IsExcludedFreq
+// Test whether a frequency should be excluded from listening
+//
+bool IsExcludedFreq (freq_t *freq)
+{
+    if (ExcludedFreq_Max == 0)
+        return false;
+
+    for (int i = 0; i < ExcludedFreq_Max; i++)
+    {
+        // Use same tolerance as banned frequencies
+        if (*freq >= (ExcludedFrequencies[i].freq - g_ban_tollerance) &&
+            *freq <  (ExcludedFrequencies[i].freq + g_ban_tollerance))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 //
 // Debounce
@@ -1791,9 +1922,21 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
                 {
                     skip = true;
                 }
+                else if (IsExcludedFreq(&current_freq))
+                {
+                    // Frequency is excluded - skip listening but continue scanning
+                    if (opt_verbose)
+                    {
+                        printf("Freq: %s excluded (carrier/unwanted signal)\n", print_freq(current_freq));
+                        fflush(stdout);
+                    }
+                    skip = true;
+                }
                 else
                 {
                     SaveFreq(current_freq);
+                    // Save to file if option enabled (this is the fine-tuned frequency)
+                    SaveActiveFrequency(current_freq, level, squelch);
                     if (opt_record)
                     {
                         StartRecording(sockfd);
@@ -1989,6 +2132,12 @@ int main(int argc, char **argv) {
     {
         SetSquelchLevel(sockfd, opt_set_squelch_value);
         printf ("Squelch level set to %.2f dB\n", opt_set_squelch_value);
+    }
+
+    // Load excluded frequencies if file specified
+    if (opt_exclude_active_file != NULL)
+    {
+        LoadExcludedFrequencies(opt_exclude_active_file);
     }
 
     if (opt_scan_mode == bookmark)
