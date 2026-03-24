@@ -28,7 +28,24 @@ SOFTWARE.
  * A simple frequency scanner for gqrx
  *
  * usage: see print_usage()
- *       
+ *
+ * CHANGELOG:
+ * 2026-03-24:
+ *   - Add interactive controls: Space/'p' for pause/resume, 'a' to manually add to active list
+ *   - Add 'b' key now bans AND adds to excluded list (removed separate 's' key)
+ *   - Add clear status messages for all actions (ban, skip, pause, clear, add)
+ *   - Add --demod-mode / -D option to set Gqrx demodulator (FM, AM, WFM, etc.)
+ *   - Add --filter-width / -W option with presets (narrow=5K, normal=10K, wide=20K)
+ *   - Add range support in ban-file format (136.000-138.000 for frequency ranges)
+ *   - Add auto-save to active list when --max-listen time reached without skip/ban
+ *   - Add --bookmarks-file / -F option for custom bookmark files
+ *   - Add simple format support for bookmarks (one freq per line, compatible with --save-active)
+ *   - Rename --exclude-active to --ban-file/--skip-file (both aliases work)
+ *   - Change --save-active format to simple (one freq per line) for reusability
+ *   - Fix elapsed time calculation (was showing "31 days" due to localtime() misuse)
+ *   - Fix ban-file reload on each scan cycle when --repeat used (detects external edits)
+ *   - Fix warning suppression when ban-file doesn't exist (normal condition)
+ *
  */
 #define _GNU_SOURCE // strcasestr
 #include <stdio.h>
@@ -69,7 +86,9 @@ SOFTWARE.
 // Globals definitions
 //
 typedef struct {
-    freq_t freq; // frequency in Mhz
+    freq_t freq; // frequency in Mhz (center freq for ranges)
+    freq_t freq_min; // 0 = single freq, otherwise range start
+    freq_t freq_max; // 0 = single freq, otherwise range end
     double noise_floor; // averages noise floor of frequency
     int count; // hit count on sweep scan
     int miss;  // miss count on sweep scan
@@ -147,7 +166,10 @@ bool            opt_freq_direction_up = true;     // true = scan upward, false =
 bool            opt_set_squelch_enable = false;   // true if user wants to set initial squelch
 double          opt_set_squelch_value = 0.0;      // initial squelch value to set
 char           *opt_save_active_file = NULL;      // file to save active frequencies
-char           *opt_exclude_active_file = NULL;   // file with frequencies to exclude from listening
+char           *opt_ban_file = NULL;              // file with frequencies to ban/skip (ranges supported)
+char           *opt_bookmarks_file = NULL;        // custom bookmarks file (NULL = use default ~/.config/gqrx/bookmarks.csv)
+char           *opt_demod_mode = "FM";            // demodulator mode (AM, FM, WFM, LSB, USB, CW, etc.)
+int             opt_filter_width = 10000;         // filter width/passband in Hz (Default: normal=10K)
 //
 // Local Prototypes
 //
@@ -157,6 +179,7 @@ void ClearAllBans ( void );
 bool SaveActiveFrequency (freq_t freq, double level, double squelch);
 bool LoadExcludedFrequencies (const char *filename);
 bool IsExcludedFreq (freq_t *freq);
+bool AddToExcludedList (freq_t freq);
 
 //
 // ParseInputOptions
@@ -168,7 +191,9 @@ void print_usage ( char *name )
     printf ("%s\n\t\t[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]\n", name);
     printf ("\t\t[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]\n");
     printf ("\t\t[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]\n");
-    printf ("\t\t[-A|--save-active <file>] [-E|--exclude-active <file>]\n");
+    printf ("\t\t[-A|--save-active <file>] [-B|--ban-file|--skip-file <file>]\n");
+    printf ("\t\t[-F|--bookmarks-file <file>]\n");
+    printf ("\t\t[-D|--demod-mode <mode>] [-W|--filter-width <bw>]\n");
     printf ("\t\t[-d|--delay <time>] [-l|--max-listen <time>]\n");
     printf ("\t\t[-t|--tags <\"tag1|tag2|...\">]\n");
     printf ("\t\t[-v|--verbose]\n");
@@ -228,15 +253,39 @@ void print_usage ( char *name )
     printf ("-S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning\n");
     printf ("                               Example: --set-squelch -50.5\n");
     printf ("-A, --save-active <file>     Save active frequencies to file (append mode)\n");
-    printf ("                               Saves frequency after fine-tuning when signal is detected\n");
-    printf ("                               Format: timestamp,freq_mhz,signal_level,squelch_level\n");
-    printf ("                               Example: --save-active active_freqs.csv\n");
-    printf ("-E, --exclude-active <file>  Exclude frequencies from listening (carriers, unwanted signals)\n");
-    printf ("                               File format: one frequency per line (MHz or Hz)\n");
+    printf ("                               Format: one frequency per line in MHz (e.g., 152.432000)\n");
+    printf ("                               Can be reused as --ban-file input\n");
+    printf ("                               Example: --save-active active_freqs.lst\n");
+    printf ("-B, --ban-file <file>        Ban/skip frequencies from file (carriers, unwanted signals)\n");
+    printf ("    --skip-file <file>         Same as --ban-file (alias)\n");
+    printf ("                               File format: one frequency or range per line (MHz or Hz)\n");
+    printf ("                               Single: 152.432 or ranges: 136.000-138.000\n");
     printf ("                               Comments start with #\n");
-    printf ("                               Example: --exclude-active excluded.txt\n");
+    printf ("                               Example: --ban-file banned.txt\n");
+    printf ("-F, --bookmarks-file <file>  Custom bookmarks file for bookmark scan mode\n");
+    printf ("                               Default: ~/.config/gqrx/bookmarks.csv\n");
+    printf ("                               Supports Gqrx CSV format AND simple format (like --save-active)\n");
+    printf ("                               Simple format: one frequency per line in MHz\n");
+    printf ("                               Example: --bookmarks-file active.lst\n");
+    printf ("-D, --demod-mode <mode>      Set Gqrx demodulator mode. Default: FM (Narrow FM)\n");
+    printf ("                               Available modes: AM, FM, WFM, WFM_ST, LSB, USB, CW, CWL, CWU\n");
+    printf ("                               FM = Narrow FM, WFM = Wide FM (broadcast)\n");
+    printf ("                               Example: --demod-mode AM\n");
+    printf ("-W, --filter-width <bw>      Set filter width/passband. Default: normal (10 KHz)\n");
+    printf ("                               Presets: narrow (5 KHz), normal (10 KHz), wide (20 KHz)\n");
+    printf ("                               Or numeric value with K/KHz, M/MHz suffixes, or Hz\n");
+    printf ("                               Examples: --filter-width wide, --filter-width 12K\n");
     printf ("-v, --verbose                Output more information during scan (used for debug). Default: false\n");
     printf ("--help                       This help message.\n");
+    printf ("\n");
+    printf ("Interactive keyboard commands while listening to active frequency:\n");
+    printf ("  a/A         Add frequency to active list (saved to --save-active file)\n");
+    printf ("  b           Ban frequency (add to ban-file, skip immediately)\n");
+    printf ("  c           Clear all bans from current session\n");
+    printf ("  Space/p     Pause/resume scanning\n");
+    printf ("  Enter       Skip to next frequency\n");
+    printf ("\n");
+    printf ("Note: If --max-listen time is reached without skip/ban, frequency is auto-saved.\n");
     printf ("\n");
     printf ("Examples:\n");
     printf ("%s -m bookmark --min 430000000 --max 431000000 --tags \"DMR|Radio Links\"\n", name);
@@ -429,13 +478,17 @@ bool ParseInputOptions (int argc, char **argv)
           {"repeat",  required_argument, 0, 'n'},
           {"set-squelch", required_argument, 0, 'S'},
           {"save-active", required_argument, 0, 'A'},
-          {"exclude-active", required_argument, 0, 'E'},
+          {"ban-file", required_argument, 0, 'B'},
+          {"skip-file", required_argument, 0, 'B'},
+          {"bookmarks-file", required_argument, 0, 'F'},
+          {"demod-mode", required_argument, 0, 'D'},
+          {"filter-width", required_argument, 0, 'W'},
           {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:rR:n:S:A:E:",
+        c = getopt_long (argc, argv, "vwh:p:m:f:b:e:s:t:d:x:y:q:l:rR:n:S:A:B:F:D:W:",
                         long_options, &option_index);
 
         // warning: I don't know why but required argument are not so "required"
@@ -841,13 +894,100 @@ bool ParseInputOptions (int argc, char **argv)
                 }
                 opt_save_active_file = optarg;
                 break;
-            case 'E':
+            case 'B':
                 if (optarg[0] == '-')
                 {
                     printf ("Error: -%c: option requires an argument\n", c);
                     print_usage(argv[0]);
                 }
-                opt_exclude_active_file = optarg;
+                opt_ban_file = optarg;
+                break;
+            case 'F':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+                opt_bookmarks_file = optarg;
+                break;
+            case 'D':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+                opt_demod_mode = optarg;
+                break;
+            case 'W':
+                if (optarg[0] == '-')
+                {
+                    printf ("Error: -%c: option requires an argument\n", c);
+                    print_usage(argv[0]);
+                }
+
+                // Check if it's a preset keyword
+                char width_arg[50] = {0};
+                strncpy(width_arg, optarg, 49);
+                for (int i = 0; width_arg[i]; i++) {
+                    width_arg[i] = tolower(width_arg[i]);
+                }
+
+                if (strcmp(width_arg, "narrow") == 0)
+                {
+                    opt_filter_width = 5000;
+                }
+                else if (strcmp(width_arg, "normal") == 0)
+                {
+                    opt_filter_width = 10000;
+                }
+                else if (strcmp(width_arg, "wide") == 0)
+                {
+                    opt_filter_width = 20000;
+                }
+                else
+                {
+                    // Parse filter width with K/M suffix support
+                    char *width_endptr;
+                    double width_value = strtod(optarg, &width_endptr);
+
+                    if (width_value <= 0)
+                    {
+                        printf ("Error: --filter-width: Invalid value (must be > 0 or narrow/normal/wide)\n");
+                        print_usage(argv[0]);
+                    }
+
+                    if (*width_endptr != '\0')
+                    {
+                        // Has suffix
+                        char width_suffix[10] = {0};
+                        int j = 0;
+                        while (*width_endptr != '\0' && j < 9)
+                        {
+                            width_suffix[j] = toupper(*width_endptr);
+                            width_endptr++;
+                            j++;
+                        }
+
+                        if (strcmp(width_suffix, "M") == 0 || strcmp(width_suffix, "MHZ") == 0)
+                        {
+                            opt_filter_width = (int)(width_value * 1000000);
+                        }
+                        else if (strcmp(width_suffix, "K") == 0 || strcmp(width_suffix, "KHZ") == 0)
+                        {
+                            opt_filter_width = (int)(width_value * 1000);
+                        }
+                        else
+                        {
+                            printf ("Error: --filter-width: Invalid suffix (use K/KHz, M/MHz, or narrow/normal/wide)\n");
+                            print_usage(argv[0]);
+                        }
+                    }
+                    else
+                    {
+                        // No suffix - assume Hz
+                        opt_filter_width = (int)width_value;
+                    }
+                }
                 break;
             case '?':
             /* getopt_long already printed an error message. */
@@ -963,43 +1103,50 @@ time_t DiffTime(char *timestamp, time_t start_time)
     time_t etime = time (NULL);
     seconds = difftime(etime , start_time);
 
-    // casting to time_t, someone with better idea may change this to be more consistent
     time_t elapsed = (time_t)seconds;
-    struct tm *ltime = localtime(&elapsed);
     timestamp[0] = '\0';
 
+    // Manual conversion of elapsed seconds to days/hours/minutes/seconds
+    int days = elapsed / 86400;
+    int remainder = elapsed % 86400;
+    int hours = remainder / 3600;
+    remainder = remainder % 3600;
+    int minutes = remainder / 60;
+    int secs = remainder % 60;
 
-    if (ltime->tm_mday > 1)
+    if (days > 0)
     {
-          char days[10];
-          sprintf(days, "%2d days ", ltime->tm_mday);
-          strcat(timestamp, days);
+        char days_str[10];
+        sprintf(days_str, "%d days ", days);
+        strcat(timestamp, days_str);
     }
-    if (ltime->tm_hour > (int)(ltime->tm_gmtoff/3600))
+    if (hours > 0)
     {
-          char hours[10];
-          sprintf(hours, "%2.2d:", (int)(ltime->tm_hour - (ltime->tm_gmtoff/3600)) );
-          strcat(timestamp, hours);
+        char hours_str[10];
+        sprintf(hours_str, "%2.2d:", hours);
+        strcat(timestamp, hours_str);
     }
+    if (minutes > 0 || hours > 0)
+    {
+        char min_str[16];
+        sprintf(min_str, "%2.2d:", minutes);
+        strcat(timestamp, min_str);
+    }
+    char sec_str[16];
+    sprintf(sec_str, "%2.2d sec", secs);
+    strcat(timestamp, sec_str);
 
-    if (ltime->tm_min > 0)
-    {
-        char min[16];
-        sprintf(min, "%2.2d:", ltime->tm_min);
-        strcat(timestamp, min);
-    }
-        char sec[16];
-        sprintf(sec, "%2.2d sec", ltime->tm_sec);
-        strcat(timestamp, sec);
     return elapsed;
 }
 
 //
 // CheckUserInput
 //
-// Clear the bans if 'c' is pressed during the scan cycles
+// Handle user keyboard input during scan:
+// - 'c': Clear all bans
+// - 'p' or Space: Toggle pause/resume
 //
-void CheckUserInput (void)
+void CheckUserInput (freq_t current_freq)
 {
     int     hit = 0;
     char    c;
@@ -1023,12 +1170,20 @@ void CheckUserInput (void)
                 {
                     // Clear all bans
                     ClearAllBans();
+                    printf("\n[CLEARED] All bans removed\n");
+                    fflush(stdout);
                     continue;
                 }
+                case ' ':  // Space bar - toggle pause
                 case 'p':
                 {
-                    // pause until another 'p'
+                    // pause until another space/p
                     pause ^= true; // switch pause mode
+                    if (pause)
+                        printf("\n[PAUSED] Press SPACE or 'p' to resume...\n");
+                    else
+                        printf("\n[RESUMED] Continuing scan...\n");
+                    fflush(stdout);
                     break;
                 }
                 default:
@@ -1051,9 +1206,10 @@ void CheckUserInput (void)
 //
 // WaitUserInputOrDelay
 // Waits for user input or a delay after the carrier is gone
-// Returns if the user has pressed <space> or <enter> to skip frequency
+// Returns skip=true if user skipped/banned the frequency
+// Sets save_active=true if user pressed 'a' or max-listen reached without skip/ban
 //
-bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq)
+bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq, bool *save_active)
 {
     double    squelch;
     double  level;
@@ -1062,6 +1218,7 @@ bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq)
     char    c;
     bool    skip = false;
     bool    pause = false;
+    *save_active = false;  // Initialize to false
 
 #ifndef OSX
     __fpurge(stdin);
@@ -1081,17 +1238,34 @@ bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq)
             c = fgetc(stdin);
             switch (c)
             {
-                case ' ':
-                case '\n':
+                case ' ':  // Space - pause/resume while listening
+                case 'p':
                 {
+                    // pause until another space/p
+                    pause ^= true; // switch pause mode
+                    if (pause)
+                        printf("\n[PAUSED] Press SPACE or 'p' to resume...\n");
+                    else
+                        printf("\n[RESUMED] Continuing listening...\n");
+                    fflush(stdout);
+                    exit = 0;
+                    break;
+                }
+                case '\n':  // Enter - skip and continue
+                {
+                    printf("\n[SKIPPED] Continuing scan...\n");
+                    fflush(stdout);
                     exit = 1; // exit
                     skip = true;
                     break;
                 }
                 case 'b':
                 {
-                    // Ban a frequency
+                    // Ban frequency and add to excluded list
                     BanFreq(*current_freq);
+                    AddToExcludedList(*current_freq);
+                    printf("\n[BANNED] Freq: %s added to ban/excluded list\n", print_freq(*current_freq));
+                    fflush(stdout);
                     exit = 1;
                     skip = true;
                     break;
@@ -1100,14 +1274,20 @@ bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq)
                 {
                     // Clear all bans
                     ClearAllBans();
+                    printf("\n[CLEARED] All bans removed\n");
+                    fflush(stdout);
                     exit = 0;
                     break;
                 }
-                case 'p':
+                case 'a':
+                case 'A':
                 {
-                    // pause until another 'p'
-                    pause ^= true; // switch pause mode
-                    exit = 0;
+                    // Add to active frequency list
+                    *save_active = true;
+                    printf("\n[ADDED] Freq: %s added to active list\n", print_freq(*current_freq));
+                    fflush(stdout);
+                    exit = 1;
+                    skip = false;  // Not a skip, just saving
                     break;
                 }
                 default:
@@ -1126,8 +1306,13 @@ bool WaitUserInputOrDelay (int sockfd, long delay, freq_t *current_freq)
 
         listen_time += sleep;
         if (opt_max_listen != 0 && opt_max_listen <= listen_time) {
+            // Max listen time reached - auto-save if not skipped/banned
+            if (!skip) {
+                *save_active = true;
+                printf("\n[AUTO-ADDED] Max listen time reached, freq saved to active list\n");
+                fflush(stdout);
+            }
             exit = 1;
-            skip = true;
         }
 
         // exit = 0
@@ -1200,15 +1385,29 @@ bool prefix(const char *pre, const char *str)
 }
 
 //
-// LoadFrequencies from gqrx file format
+// LoadFrequencies from file (supports Gqrx CSV format and simple format)
 //
 bool LoadFrequencies (FILE *bookmarksfd)
 {
     char buf[BUFSIZE];
     char *line;
     bool start = false;
+    bool is_gqrx_format = false;
     char *freq, *other;
     int i = 0;
+
+    // First pass: detect format by looking for Gqrx CSV header
+    long file_pos = ftell(bookmarksfd);
+    while (fgets(buf, BUFSIZE, bookmarksfd) != NULL)
+    {
+        if (prefix("# Frequency ;", buf))
+        {
+            is_gqrx_format = true;
+            break;
+        }
+    }
+    // Rewind to start of file
+    fseek(bookmarksfd, file_pos, SEEK_SET);
 
     while (1)
     {
@@ -1216,14 +1415,31 @@ bool LoadFrequencies (FILE *bookmarksfd)
         if (line == (char *) NULL)
             break;
 
-        if (prefix("# Frequency ;", line))
+        if (is_gqrx_format)
         {
+            // Gqrx CSV format
+            if (prefix("# Frequency ;", line))
+            {
+                start = true;
+                continue;
+            }
+
+            if (!start)
+                continue;
+        }
+        else
+        {
+            // Simple format: skip comments and empty lines
+            if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+                continue;
             start = true;
-            continue;
         }
 
         if (start)
         {
+            if (is_gqrx_format)
+            {
+                // Parse Gqrx CSV format
             char * token = strtok(line, ";"); // freq
             if ((token == NULL) || (sscanf(token, "%llu", &Frequencies[i].freq) < 0))
               continue; // skip empty lines
@@ -1248,17 +1464,45 @@ bool LoadFrequencies (FILE *bookmarksfd)
                 k++;
                 tag = strtok (NULL, ",\n");
             }
-            Frequencies[i].tag_max = k;
-            //printf(":%llu: %s\n", Frequencies[i].freq, Frequencies[i].descr); //$$$
-            i++;
-            if (i >= FREQ_MAX)
+                Frequencies[i].tag_max = k;
+                //printf(":%llu: %s\n", Frequencies[i].freq, Frequencies[i].descr); //$$$
+                i++;
+                if (i >= FREQ_MAX)
+                {
+                    printf("Warning: Too many frequencies in bookmarks file, max %d\n", FREQ_MAX);
+                    break;
+                }
+            }
+            else
             {
-                printf("Warning: Too many frequencies in bookmarks file, max %d\n", FREQ_MAX);
-                break;
+                // Parse simple format: one frequency per line (MHz or Hz)
+                double freq_value;
+                if (sscanf(line, "%lf", &freq_value) == 1)
+                {
+                    freq_t freq;
+                    // If value is small, assume MHz, otherwise Hz
+                    if (freq_value < 10000)
+                        freq = (freq_t)(freq_value * 1000000);
+                    else
+                        freq = (freq_t)freq_value;
+
+                    Frequencies[i].freq = freq;
+                    Frequencies[i].freq_min = 0;
+                    Frequencies[i].freq_max = 0;
+                    snprintf(Frequencies[i].descr, BUFSIZE, "%.6f MHz", freq / 1000000.0);
+                    Frequencies[i].tag_max = 0;  // No tags in simple format
+                    i++;
+                    if (i >= FREQ_MAX)
+                    {
+                        printf("Warning: Too many frequencies in bookmarks file, max %d\n", FREQ_MAX);
+                        break;
+                    }
+                }
             }
         }
     }
     Frequencies_Max = i;
+    printf("Loaded %d frequencies from bookmarks file\n", Frequencies_Max);
     return true;
 }
 
@@ -1320,7 +1564,13 @@ bool ScanBookmarkedFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_m
 
     while (keep_scanning)
     {
-        CheckUserInput();
+        // Reload banned/skipped frequencies at start of each cycle (for external file updates)
+        if (opt_ban_file != NULL)
+        {
+            LoadExcludedFrequencies(opt_ban_file);
+        }
+
+        CheckUserInput(current_freq);
 
         for (int i = 0; i < Frequencies_Max; i++)
         {
@@ -1368,8 +1618,16 @@ bool ScanBookmarkedFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_m
                                     Frequencies[i].descr, level, squelch);
                         }
                         fflush(stdout);
-                        skip = WaitUserInputOrDelay(sockfd, opt_delay, &current_freq);
+                        bool save_active = false;
+                        skip = WaitUserInputOrDelay(sockfd, opt_delay, &current_freq, &save_active);
                         time_t elapsed = DiffTime(timestamp, hit_time);
+
+                        // Save to active list if requested
+                        if (save_active)
+                        {
+                            SaveActiveFrequency(current_freq, level, squelch);
+                        }
+
                         if (opt_record)
                         {
                             StopRecording(sockfd);
@@ -1460,6 +1718,8 @@ bool SaveFreq(freq_t freq_current)
 
 //
 // Ban a frequency found
+// Bans a range: (freq - step) to (freq + step)
+// Total banned: 2 * step, with freq in the center
 //
 bool BanFreq (freq_t freq_current)
 {
@@ -1467,7 +1727,10 @@ bool BanFreq (freq_t freq_current)
     if (i >= SAVED_FREQ_MAX)
         return false;
 
-    BannedFrequencies[i].freq  = freq_current;
+    // Ban as range: freq ± step
+    BannedFrequencies[i].freq = freq_current;
+    BannedFrequencies[i].freq_min = freq_current - opt_scan_bw;
+    BannedFrequencies[i].freq_max = freq_current + opt_scan_bw;
     BannedFreq_Max++;
 
     for (i = 0; i < SavedFreq_Max; i++)
@@ -1492,21 +1755,45 @@ void ClearAllBans ( void )
 
 //
 // IsBannedFreq
-// Test whether a frequency is banned or not
+// Test whether a frequency is banned or not (supports ranges)
 //
 bool IsBannedFreq (freq_t *freq_current)
 {
     int i;
     for (i = 0; i < BannedFreq_Max; i++)
     {
-        if (*freq_current >= (BannedFrequencies[i].freq - g_ban_tollerance) &&
-            *freq_current <  (BannedFrequencies[i].freq + g_ban_tollerance)   )
+        bool in_banned = false;
+
+        // Check if this is a range ban
+        if (BannedFrequencies[i].freq_min != 0 && BannedFrequencies[i].freq_max != 0)
         {
-            // scanning
-            *freq_current+= (g_ban_tollerance * 2); // avoid jumping neearby a carrier
-            // round up to next near tenth of khz  145892125 -> 145900000
-            *freq_current = ceil( *freq_current / 10000.0 ) * 10000.0;
-            IsBannedFreq (freq_current);
+            // Range ban: check if freq is within range
+            if (*freq_current >= BannedFrequencies[i].freq_min &&
+                *freq_current <= BannedFrequencies[i].freq_max)
+            {
+                // Jump to end of banned range
+                *freq_current = BannedFrequencies[i].freq_max + opt_scan_bw;
+                // Round up to next tenth of kHz
+                *freq_current = ceil(*freq_current / 10000.0) * 10000.0;
+                in_banned = true;
+            }
+        }
+        else
+        {
+            // Single frequency ban with tolerance
+            if (*freq_current >= (BannedFrequencies[i].freq - g_ban_tollerance) &&
+                *freq_current <  (BannedFrequencies[i].freq + g_ban_tollerance))
+            {
+                *freq_current += (g_ban_tollerance * 2);
+                // Round up to next tenth of kHz
+                *freq_current = ceil(*freq_current / 10000.0) * 10000.0;
+                in_banned = true;
+            }
+        }
+
+        if (in_banned)
+        {
+            IsBannedFreq(freq_current);  // Recursively check if new freq is also banned
             return true;
         }
     }
@@ -1516,7 +1803,7 @@ bool IsBannedFreq (freq_t *freq_current)
 
 //
 // SaveActiveFrequency
-// Saves frequency to file after fine-tuning (append mode)
+// Saves frequency to file (append mode) - simple format: one frequency per line
 //
 bool SaveActiveFrequency (freq_t freq, double level, double squelch)
 {
@@ -1530,17 +1817,8 @@ bool SaveActiveFrequency (freq_t freq, double level, double squelch)
         return false;
     }
 
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", t);
-
-    // Format: timestamp, frequency (MHz), signal level, squelch level
-    fprintf(fp, "%s,%.6f,%.2f,%.2f\n",
-            timestamp,
-            freq / 1000000.0,  // Convert to MHz
-            level,
-            squelch);
+    // Format: frequency in MHz (one per line)
+    fprintf(fp, "%.6f\n", freq / 1000000.0);
 
     fclose(fp);
     return true;
@@ -1548,14 +1826,19 @@ bool SaveActiveFrequency (freq_t freq, double level, double squelch)
 
 //
 // LoadExcludedFrequencies
-// Load frequencies from file to exclude from listening
+// Load frequencies from file to exclude from listening (supports ranges: 136.000-138.000)
 //
 bool LoadExcludedFrequencies (const char *filename)
 {
     FILE *fp = fopen(filename, "r");
     if (fp == NULL)
     {
-        printf("Warning: Cannot open exclude-active file: %s\n", filename);
+        // Only show warning if it's not just "file doesn't exist"
+        // File not existing is normal - it will be created when first ban is added
+        if (errno != ENOENT)
+        {
+            printf("Warning: Cannot open ban-file: %s (%s)\n", filename, strerror(errno));
+        }
         return false;
     }
 
@@ -1568,7 +1851,35 @@ bool LoadExcludedFrequencies (const char *filename)
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
             continue;
 
-        // Try to parse frequency (supports MHz format or Hz)
+        // Check if this is a range (format: 136.000-138.000)
+        char *dash = strchr(line, '-');
+        if (dash != NULL && dash != line)  // Dash found and not at start (not negative number)
+        {
+            // Try to parse as range
+            double freq_min_val, freq_max_val;
+            if (sscanf(line, "%lf-%lf", &freq_min_val, &freq_max_val) == 2)
+            {
+                freq_t freq_min, freq_max;
+                // If value is small, assume MHz, otherwise Hz
+                if (freq_min_val < 10000)
+                    freq_min = (freq_t)(freq_min_val * 1000000);
+                else
+                    freq_min = (freq_t)freq_min_val;
+
+                if (freq_max_val < 10000)
+                    freq_max = (freq_t)(freq_max_val * 1000000);
+                else
+                    freq_max = (freq_t)freq_max_val;
+
+                ExcludedFrequencies[ExcludedFreq_Max].freq = (freq_min + freq_max) / 2;  // Center
+                ExcludedFrequencies[ExcludedFreq_Max].freq_min = freq_min;
+                ExcludedFrequencies[ExcludedFreq_Max].freq_max = freq_max;
+                ExcludedFreq_Max++;
+                continue;
+            }
+        }
+
+        // Try to parse as single frequency
         double freq_value;
         if (sscanf(line, "%lf", &freq_value) == 1)
         {
@@ -1580,18 +1891,20 @@ bool LoadExcludedFrequencies (const char *filename)
                 freq = (freq_t)freq_value;
 
             ExcludedFrequencies[ExcludedFreq_Max].freq = freq;
+            ExcludedFrequencies[ExcludedFreq_Max].freq_min = 0;  // Single frequency
+            ExcludedFrequencies[ExcludedFreq_Max].freq_max = 0;
             ExcludedFreq_Max++;
         }
     }
 
     fclose(fp);
-    printf("Loaded %d excluded frequencies from %s\n", ExcludedFreq_Max, filename);
+    printf("Loaded %d excluded frequencies/ranges from %s\n", ExcludedFreq_Max, filename);
     return true;
 }
 
 //
 // IsExcludedFreq
-// Test whether a frequency should be excluded from listening
+// Test whether a frequency should be excluded from listening (supports ranges)
 //
 bool IsExcludedFreq (freq_t *freq)
 {
@@ -1600,14 +1913,90 @@ bool IsExcludedFreq (freq_t *freq)
 
     for (int i = 0; i < ExcludedFreq_Max; i++)
     {
-        // Use same tolerance as banned frequencies
-        if (*freq >= (ExcludedFrequencies[i].freq - g_ban_tollerance) &&
-            *freq <  (ExcludedFrequencies[i].freq + g_ban_tollerance))
+        // Check if this is a range
+        if (ExcludedFrequencies[i].freq_min != 0 && ExcludedFrequencies[i].freq_max != 0)
         {
-            return true;
+            // Range: check if freq is within range
+            if (*freq >= ExcludedFrequencies[i].freq_min &&
+                *freq <= ExcludedFrequencies[i].freq_max)
+            {
+                return true;
+            }
+        }
+        else
+        {
+            // Single frequency: use tolerance
+            if (*freq >= (ExcludedFrequencies[i].freq - g_ban_tollerance) &&
+                *freq <  (ExcludedFrequencies[i].freq + g_ban_tollerance))
+            {
+                return true;
+            }
         }
     }
     return false;
+}
+
+//
+// AddToExcludedList
+// Add frequency range to excluded list (freq ± step)
+// Creates range: (freq - step) to (freq + step) with freq in center
+//
+bool AddToExcludedList (freq_t freq)
+{
+    freq_t freq_min = freq - opt_scan_bw;
+    freq_t freq_max = freq + opt_scan_bw;
+
+    // Check if already in list (check against ranges)
+    for (int i = 0; i < ExcludedFreq_Max; i++)
+    {
+        // Check if overlaps with existing range
+        if (ExcludedFrequencies[i].freq_min != 0 && ExcludedFrequencies[i].freq_max != 0)
+        {
+            if (freq >= ExcludedFrequencies[i].freq_min &&
+                freq <= ExcludedFrequencies[i].freq_max)
+            {
+                // Already in range
+                return true;
+            }
+        }
+        else
+        {
+            if (freq >= (ExcludedFrequencies[i].freq - g_ban_tollerance) &&
+                freq <  (ExcludedFrequencies[i].freq + g_ban_tollerance))
+            {
+                // Already in list
+                return true;
+            }
+        }
+    }
+
+    // Add to memory as range
+    if (ExcludedFreq_Max < SAVED_FREQ_MAX)
+    {
+        ExcludedFrequencies[ExcludedFreq_Max].freq = freq;
+        ExcludedFrequencies[ExcludedFreq_Max].freq_min = freq_min;
+        ExcludedFrequencies[ExcludedFreq_Max].freq_max = freq_max;
+        ExcludedFreq_Max++;
+    }
+    else
+    {
+        printf("Warning: Excluded list full, cannot add more frequencies\n");
+        return false;
+    }
+
+    // If file specified, append range to it
+    if (opt_ban_file != NULL)
+    {
+        FILE *fp = fopen(opt_ban_file, "a");
+        if (fp != NULL)
+        {
+            fprintf(fp, "%.6f-%.6f  # Range added during scan (center: %.6f)\n",
+                    freq_min / 1000000.0, freq_max / 1000000.0, freq / 1000000.0);
+            fclose(fp);
+        }
+    }
+
+    return true;
 }
 
 
@@ -1855,9 +2244,15 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
 
     while (keep_scanning)
     {
+        // Reload banned/skipped frequencies at start of each cycle (for external file updates)
+        if (opt_ban_file != NULL)
+        {
+            LoadExcludedFrequencies(opt_ban_file);
+        }
+
         for ( size_t i = 0 ; i < freqeuencies_count; i++)
         {
-            CheckUserInput();
+            CheckUserInput(current_freq);
 
             IsBannedFreq(&current_freq); // test and change current_frequency to next available slot;
             SetFreq(sockfd, current_freq);
@@ -1947,8 +2342,6 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
                 else
                 {
                     SaveFreq(current_freq);
-                    // Save to file if option enabled (this is the fine-tuned frequency)
-                    SaveActiveFrequency(current_freq, level, squelch);
                     if (opt_record)
                     {
                         StartRecording(sockfd);
@@ -1973,8 +2366,16 @@ bool ScanFrequenciesInRange(int sockfd, freq_t freq_min, freq_t freq_max, freq_t
                     }
                     fflush(stdout);
                     // Wait user input or delay time after signal lost
-                    skip = WaitUserInputOrDelay(sockfd, opt_delay, &current_freq);
+                    bool save_active = false;
+                    skip = WaitUserInputOrDelay(sockfd, opt_delay, &current_freq, &save_active);
                     time_t elapsed = DiffTime(timestamp, hit_time);
+
+                    // Save to active list if requested
+                    if (save_active)
+                    {
+                        SaveActiveFrequency(current_freq, level, squelch);
+                    }
+
                     if (opt_record)
                     {
                         StopRecording(sockfd);
@@ -2146,15 +2547,33 @@ int main(int argc, char **argv) {
         printf ("Squelch level set to %.2f dB\n", opt_set_squelch_value);
     }
 
-    // Load excluded frequencies if file specified
-    if (opt_exclude_active_file != NULL)
+    // Set demodulator mode and filter width
+    if (opt_demod_mode != NULL)
     {
-        LoadExcludedFrequencies(opt_exclude_active_file);
+        if (opt_filter_width > 0)
+        {
+            SetModeAndPassband(sockfd, opt_demod_mode, opt_filter_width);
+            printf ("Demodulator mode set to %s, filter width: %d Hz\n", opt_demod_mode, opt_filter_width);
+        }
+        else
+        {
+            SetMode(sockfd, opt_demod_mode);
+            printf ("Demodulator mode set to %s\n", opt_demod_mode);
+        }
+    }
+    else if (opt_filter_width > 0)
+    {
+        // Filter width specified without mode - use current mode (get it first)
+        char current_mode[BUFSIZE];
+        GetMode(sockfd, current_mode);
+        SetModeAndPassband(sockfd, current_mode, opt_filter_width);
+        printf ("Filter width set to %d Hz (mode: %s)\n", opt_filter_width, current_mode);
     }
 
     if (opt_scan_mode == bookmark)
     {
-        bookmarksfd = Open(g_bookmarksfile);
+        const char *bookmarks_path = opt_bookmarks_file != NULL ? opt_bookmarks_file : g_bookmarksfile;
+        bookmarksfd = Open(bookmarks_path);
         LoadFrequencies (bookmarksfd);
     }
 

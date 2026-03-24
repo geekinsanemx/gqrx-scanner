@@ -249,3 +249,61 @@ bool StopRecording(int sockfd)
 
     return true;
 }
+
+//
+// SetMode
+// Set demodulator mode (AM, FM, WFM, LSB, USB, CW, etc.)
+//
+bool SetMode(int sockfd, const char *mode)
+{
+    char buf[BUFSIZE];
+
+    sprintf(buf, "M %s\n", mode);
+    Send(sockfd, buf);
+    Recv(sockfd, buf);
+
+    if (strcmp(buf, "RPRT 1") == 0 )
+        return false;
+
+    return true;
+}
+
+//
+// SetModeAndPassband
+// Set demodulator mode and passband/filter width (AM, FM, WFM, LSB, USB, CW, etc.)
+//
+bool SetModeAndPassband(int sockfd, const char *mode, int passband)
+{
+    char buf[BUFSIZE];
+
+    sprintf(buf, "M %s %d\n", mode, passband);
+    Send(sockfd, buf);
+    Recv(sockfd, buf);
+
+    if (strcmp(buf, "RPRT 1") == 0 )
+        return false;
+
+    return true;
+}
+
+//
+// GetMode
+// Get current demodulator mode
+//
+bool GetMode(int sockfd, char *mode)
+{
+    char buf[BUFSIZE];
+
+    Send(sockfd, "m\n");
+    Recv(sockfd, buf);
+
+    if (strcmp(buf, "RPRT 1") == 0 )
+        return false;
+
+    strcpy(mode, buf);
+    // Remove newline if present
+    char *newline = strchr(mode, '\n');
+    if (newline) *newline = '\0';
+
+    return true;
+}
