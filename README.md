@@ -16,12 +16,17 @@ After the signal is lost the scanner waits a configurable ammount of time and re
 In sweep mode the scan of the band is performed fast (well, as fast as it can), self asjusting the scanning speed. On signal detection a fine tuning is performed to pinpoint the nearest carrier frequency (subdivision of upper and lower limits with increasing precision) and, for the already seen carriers, a previous value is used to avoid fine tuning at every hit. This value is also averaged out with the new one in order to converge eventually to the exact frequency in less time (after 4 hits of the same frequency).
 
 ## Features
-* Support for Gqrx bookmarks file
+* Support for Gqrx bookmarks file (CSV format and simple frequency list)
 * Fast sweep scan with adaptive monitor of the most active stations
 * Frequency range constrained scan (also for bookmarks)
-* Multiple Tag based search in bookmark scan mode ("Tag1|Tag2|TagX").
+* Multiple Tag based search in bookmark scan mode ("Tag1|Tag2|TagX")
 * Automatic Frequency Locking in sweep scan mode
-* Interactive monitor to skip, ban or pause a frequency manually
+* **Enhanced interactive controls**: pause/resume, manual save, ban with exclusion
+* **Automatic save** of interesting frequencies (manual or timeout-based)
+* **Gqrx demodulator control**: set mode (AM/FM/WFM) and filter width remotely
+* **Ban-file with range support**: exclude entire frequency ranges (e.g., 136.000-138.000)
+* **Reload on each cycle**: detect external file edits during multi-pass scans
+* **Workflow integration**: discover with sweep, monitor with bookmark mode
 * Automatic recording of detected signals
 
 ## Pre-requisites
@@ -45,7 +50,9 @@ gqrx-scanner
 		[-h|--host <host>] [-p|--port <port>] [-m|--mode <sweep|bookmark>]
 		[-f <central frequency>] [-b|--min <from freq>] [-e|--max <to freq>]
 		[-R|--range <freq range>] [-n|--repeat <N>] [-S|--set-squelch <dB>]
-		[-A|--save-active <file>] [-E|--exclude-active <file>]
+		[-A|--save-active <file>] [-B|--ban-file|--skip-file <file>]
+		[-F|--bookmarks-file <file>]
+		[-D|--demod-mode <mode>] [-W|--filter-width <bw>]
 		[-d|--delay <time>] [-l|--max-listen <time>]
 		[-t|--tags <"tag1|tag2|...">]
 		[-v|--verbose]
@@ -89,13 +96,28 @@ gqrx-scanner
 -S, --set-squelch <dB>       Set initial squelch level in Gqrx before scanning
                                Example: --set-squelch -50.5
 -A, --save-active <file>     Save active frequencies to file (append mode)
-                               Saves frequency after fine-tuning when signal is detected
-                               Format: timestamp,freq_mhz,signal_level,squelch_level
-                               Example: --save-active active_freqs.csv
--E, --exclude-active <file>  Exclude frequencies from listening (carriers, unwanted signals)
-                               File format: one frequency per line (MHz or Hz)
+                               Format: one frequency per line in MHz (e.g., 152.432000)
+                               Can be reused as --bookmarks-file input
+                               Example: --save-active active_freqs.lst
+-B, --ban-file <file>        Ban/skip frequencies from file (carriers, unwanted signals)
+    --skip-file <file>         Same as --ban-file (alias)
+                               File format: one frequency or range per line (MHz or Hz)
+                               Single: 152.432 or ranges: 136.000-138.000
                                Comments start with #
-                               Example: --exclude-active excluded.txt
+                               Example: --ban-file banned.txt
+-F, --bookmarks-file <file>  Custom bookmarks file for bookmark scan mode
+                               Default: ~/.config/gqrx/bookmarks.csv
+                               Supports Gqrx CSV format AND simple format (like --save-active)
+                               Simple format: one frequency per line in MHz
+                               Example: --bookmarks-file active.lst
+-D, --demod-mode <mode>      Set Gqrx demodulator mode. Default: FM (Narrow FM)
+                               Available modes: AM, FM, WFM, WFM_ST, LSB, USB, CW, CWL, CWU
+                               FM = Narrow FM, WFM = Wide FM (broadcast)
+                               Example: --demod-mode AM
+-W, --filter-width <bw>      Set filter width/passband. Default: normal (10 KHz)
+                               Presets: narrow (5 KHz), normal (10 KHz), wide (20 KHz)
+                               Or numeric value with K/KHz, M/MHz suffixes, or Hz
+                               Examples: --filter-width wide, --filter-width 12K
 -y  --date                   Date Format, default is 0.
                                0 = mm-dd-yy
                                1 = dd-mm-yy
@@ -118,13 +140,16 @@ gqrx-scanner
 ```
 
 ## Interactive Commands
-These keyboard shortcuts are available during scan:
+These keyboard shortcuts are available while listening to an active frequency:
 ```
-[space] OR [enter]  :   Skips a locked frequency (listening to the next).
-'b'                 :   Bans a locked frequency, the bandwidth banned is about 10 Khz from the locked freq.
-'c'                 :   Clears all banned frequencies.
-'p'                 :   Pauses scan on locked frequency, 'p' again to unpause.
+'a' or 'A'          :   Add frequency to active list (saved to --save-active file)
+'b'                 :   Ban frequency AND add to ban-file (range: freq ± step)
+'c'                 :   Clear all bans from current session
+Space or 'p'        :   Pause/resume scanning
+Enter               :   Skip to next frequency
 ```
+
+**Auto-save behavior**: If `--max-listen` time is reached without pressing skip/ban, the frequency is automatically saved to the active list.
 
 ## Examples
 Performs a sweep scan with a range of +-1Mhz from the demodulator frequency in Gqrx:
@@ -184,37 +209,70 @@ Scan 144-145MHz exactly 5 times with 2.5KHz steps:
 ```
 <br>
 
-**Active frequency logging and exclusion examples:**
+**Active frequency logging and ban-file examples:**
 
-Scan 440-441MHz and save all detected active frequencies to CSV file:
+Scan 440-441MHz and save detected active frequencies (press 'a' or wait for --max-listen):
 ```
-./gqrx-scanner -f 440M --range 500K --save-active active_freqs.csv
+./gqrx-scanner -f 440M --range 500K --save-active active_freqs.lst --max-listen 10s
 ```
 <br>
 
 Scan while excluding known carrier frequencies and unwanted signals:
 ```
-./gqrx-scanner -f 440M --range 500K --exclude-active excluded.txt
+./gqrx-scanner -f 440M --range 500K --ban-file excluded.txt
 ```
 
-Example `excluded.txt` file format:
+Example `excluded.txt` file format (supports ranges):
 ```
-# Excluded frequencies - carriers and unwanted signals
-# One frequency per line (MHz or Hz)
+# Ban-file - carriers and unwanted signals
+# Single frequencies (MHz or Hz)
 440.500
 441.200
-# DMR carrier
-440.125
+# Frequency ranges (min-max in MHz)
+136.000-138.000
+160.000-162.000
 ```
 <br>
 
 Complete monitoring setup with logging and exclusions:
 ```
 ./gqrx-scanner -f 440M --range 1M \
-  --exclude-active excluded.txt \
-  --save-active active_freqs.csv \
+  --ban-file excluded.txt \
+  --save-active active_freqs.lst \
   --max-listen 10s \
   --set-squelch -55
+```
+<br>
+
+**Workflow integration example (discover → monitor):**
+
+Step 1: Discover active frequencies with sweep scan:
+```
+./gqrx-scanner --min 136M --max 174M \
+  --save-active discovered.lst \
+  --max-listen 10s
+```
+
+Step 2: Monitor only discovered frequencies with bookmark scan:
+```
+./gqrx-scanner -m bookmark --bookmarks-file discovered.lst
+```
+<br>
+
+**Demodulator control examples:**
+
+Scan VHF airband with AM modulation and wide filter:
+```
+./gqrx-scanner --min 118M --max 137M \
+  --demod-mode AM \
+  --filter-width wide
+```
+
+Scan FM broadcast band with WFM and 200KHz filter:
+```
+./gqrx-scanner --min 88M --max 108M \
+  --demod-mode WFM \
+  --filter-width 200K
 ```
 
 ### Sample output
@@ -287,5 +345,4 @@ sudo make uninstall
 
 
 ## TODOs
-* set modulation in bookmark search
-* parsable output in csv?
+* Parsable output in CSV format
